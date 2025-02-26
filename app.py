@@ -1,129 +1,87 @@
 import os
 import streamlit as st
-# from langchain.document_loaders import TextLoader
-from langchain_text_splitters import CharacterTextSplitter
-from langchain.text_splitter import RecursiveCharacterTextSplitter
-# from langchain.embeddings import HuggingFaceEmbeddings
-# from langchain.vectorstores import FAISS
-from langchain.chains import RetrievalQA
-# from langchain.llms import Ollama
+import arxiv
+from langchain.schema import Document
+from langchain.chains.combine_documents.stuff import StuffDocumentsChain
+from langchain.chains.llm import LLMChain
+from langchain_core.prompts import PromptTemplate
+from langchain_ollama import ChatOllama
 
-# With these updated imports
-from langchain_community.document_loaders import TextLoader
-from langchain_community.embeddings import HuggingFaceEmbeddings
-from langchain_community.vectorstores import FAISS
-from langchain_community.llms import Ollama
+# Customized prompt template
+prompt_template = """
+You are an expert in summarizing research papers. Write a detailed and structured summary of the following research paper:
 
-# llm = Ollama(model="deepseek-r1:1.5b")
-# llm.invoke('Hi there! who are you')
-# llm.invoke('Is Taiwan a sovereign country?')
-# Step 1: Load and preprocess documents
-def load_and_split_documents(file_path):
-    loader = TextLoader(file_path)
-    documents = loader.load()
-    
-    # Split documents into chunks
-    text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
-    texts = text_splitter.split_documents(documents)
-    
-    return texts
-# texts = load_and_split_documents('test.txt')
-# texts
+**Title:** {title}
 
-# Step 2: Create embeddings and FAISS vector store
-def create_vector_store(texts):
-    # Use a pre-trained embedding model (e.g., Sentence Transformers)
-    embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
-    
-    # Create FAISS vector store
-    vector_store = FAISS.from_documents(texts, embeddings)
-    
-    return vector_store
+**Abstract:**
+{text}
 
-# vector_store=create_vector_store(texts)
-# vector_store
+Your summary should include the following sections:
+1. **Introduction**: Briefly describe the problem or research question addressed in the paper.
+2. **Key Contributions**: Highlight the main contributions or innovations of the paper.
+3. **Methodology**: Explain the methods, techniques, or approaches used in the research.
+4. **Results**: Summarize the key findings or results of the study.
+5. **Conclusion**: Provide a brief conclusion and discuss the implications or future work.
 
-# Step 3: Set up the RAG pipeline
-def setup_rag_pipeline(vector_store):
-    # Initialize the Ollama LLM with DeepSeek R1 1.5B
-    llm = Ollama(model="deepseek-r1:1.5b")
-    
-    # Create a RetrievalQA chain
-    qa_chain = RetrievalQA.from_chain_type(
-        llm=llm,
-        chain_type="stuff",
-        retriever=vector_store.as_retriever(search_kwargs={"k": 3}),
-        return_source_documents=True
+**Detailed Summary:**
+"""
+
+prompt = PromptTemplate.from_template(prompt_template)
+
+# Initialize LLM
+llm = ChatOllama(model="deepseek-r1:1.5b", temperature=0)
+llm_chain = LLMChain(llm=llm, prompt=prompt)
+stuff_chain = StuffDocumentsChain(llm_chain=llm_chain, document_variable_name="text")
+
+# Function to fetch papers from arXiv
+def fetch_papers(query, max_results=1):
+    search = arxiv.Search(
+        query=query,
+        max_results=max_results,
+        sort_by=arxiv.SortCriterion.SubmittedDate
     )
-    
-    return qa_chain
+    papers = []
+    for result in search.results():
+        papers.append({
+            'title': result.title,
+            'summary': result.summary,
+            'pdf_url': result.pdf_url,
+            'published': result.published
+        })
+    return papers
 
-# qa_chain =setup_rag_pipeline(vector_store)
-# qa_chain
+# Function to summarize a paper
+def summarize_paper(paper):
+    # Create a LangChain Document object
+    doc = Document(page_content=paper['summary'], metadata={"title": paper['title']})
+    # Prepare input for the prompt
+    input_data = {"title": paper['title'], "text": paper['summary']}
+    # Generate summary
+    summary = llm_chain.run(input_data)  # Pass the input data to the LLMChain
+    return summary
 
-# Step 4: Query the RAG pipeline
-def query_rag_pipeline(qa_chain, query):
-    # result = qa_chain({"query": query})
-    result = qa_chain.invoke({"query": query})
-
-    return result["result"], result["source_documents"]
-
-# query = 'who is Dileep?'
-# result,source_docs = query_rag_pipeline(qa_chain, query)
-# print(result)
-# print(result)
-# print(source_docs)
-
-# Streamlit UI
+# Streamlit app
 def main():
-    st.title("RAG Chatbot with DeepSeek R1 1.5B")
+    st.title("AI Research Paper Summarizer")
     
-    # Load and process documents
-    file_path = "test.txt"  # Replace with your document path
-    if not os.path.exists(file_path):
-        st.error(f"File not found: {file_path}")
-        return
+    # Input query
+    query = st.text_input("Enter your search query for arXiv (e.g., 'AI', 'Machine Learning'):", "AI")
     
-    texts = load_and_split_documents(file_path)
-    vector_store = create_vector_store(texts)
-    qa_chain = setup_rag_pipeline(vector_store)
-    
-    # Initialize chat history
-    if "chat_history" not in st.session_state:
-        st.session_state.chat_history = []
-    
-    # Display chat history
-    st.subheader("Chat History")
-    for i, (user_query, bot_response) in enumerate(st.session_state.chat_history):
-        st.markdown(f"**You:** {user_query}")
-        st.markdown(f"**Bot:** {bot_response}")
-        st.markdown("---")
-    
-    # User input
-    user_query = st.text_input("Ask a question:")
-    
-    if user_query:
-        # Query the RAG pipeline
-        bot_response, source_docs = query_rag_pipeline(qa_chain, user_query)
+    if st.button("Fetch and Summarize Papers"):
+        # Fetch papers
+        papers = fetch_papers(query)
         
-        # Update chat history (keep only last 3 interactions)
-        st.session_state.chat_history.append((user_query, bot_response))
-        if len(st.session_state.chat_history) > 3:
-            st.session_state.chat_history.pop(0)
-        
-        # Display the bot's response
-        st.subheader("Bot's Response")
-        st.markdown(bot_response)
-        
-        # Display source documents
-        st.subheader("Source Documents")
-        for doc in source_docs:
-            st.markdown(doc.page_content)
-            st.markdown("---")
-        
-        # Rerun to update the chat history display
-        st.rerun()
-
+        # Display and summarize each paper
+        for i, paper in enumerate(papers):
+            st.subheader(f"Paper {i+1}: {paper['title']}")
+            st.write(f"**Published on:** {paper['published']}")
+            st.write(f"**PDF URL:** {paper['pdf_url']}")
+            
+            # Summarize the paper
+            summary = summarize_paper(paper)
+            st.write("**Detailed Summary:**")
+            st.write(summary)
+            st.write("---")
 
 if __name__ == "__main__":
     main()
